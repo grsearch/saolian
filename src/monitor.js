@@ -32,18 +32,40 @@ function parsePercent(value) {
     if (num >= 0 && num <= 1) return num * 100;
     return num;
   }
-
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
   if (num >= 0 && num <= 1) return num * 100;
   return num;
 }
 
-function firstNonNull(values) {
-  for (const value of values) {
-    if (value !== null && value !== undefined) return value;
+function getPath(obj, path) {
+  if (!obj) return null;
+  const segs = path.split('.');
+  let cur = obj;
+  for (const seg of segs) {
+    if (cur === null || cur === undefined) return null;
+    if (/^\d+$/.test(seg)) {
+      cur = cur[Number(seg)];
+    } else {
+      cur = cur[seg];
+    }
   }
-  return null;
+  return cur ?? null;
+}
+
+function pickFirstPath(obj, paths) {
+  for (const path of paths) {
+    const value = getPath(obj, path);
+    if (value !== null && value !== undefined) return { value, path };
+  }
+  return { value: null, path: null };
+}
+
+function normalizeEpochMaybe(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n < 10_000_000_000) return n * 1000;
+  return n;
 }
 
 export class TokenMonitor {
@@ -133,8 +155,19 @@ export class TokenMonitor {
         sellCount: 0,
       },
       security: {
+        lpBurnedPctRaw: null,
         lpBurnedPct: null,
         lpBurnedSource: null,
+        lpBurnedPath: null,
+        lpLockedPctRaw: null,
+        lpLockedPct: null,
+        lpLockedSource: null,
+        lpLockedPath: null,
+        lpPassed: false,
+        lpReason: null,
+        mainPairAddress: null,
+        mainPairLiquidityUsd: null,
+        mainPairDex: null,
       },
     });
 
@@ -160,9 +193,9 @@ export class TokenMonitor {
       metadata: metadata.status === 'fulfilled' ? metadata.value : null,
       helius: helius.status === 'fulfilled' ? helius.value : null,
       rugcheck: null,
+      securityFetchOk: security.status === 'fulfilled',
     };
 
-    // 仅当 Birdeye 关键字段缺失时才使用 Rugcheck 兜底，减少免费 API 限频影响。
     if (this.needsRugcheckFallback(data)) {
       try {
         data.rugcheck = await this.fetchRugcheck(address);
@@ -184,40 +217,154 @@ export class TokenMonitor {
   }
 
   needsRugcheckFallback(data) {
-    const sec = data.security?.data || {};
-    const lp = firstNonNull([sec.lpBurnedPercent, sec.lpBurnedPct]);
-    const missingAuthorities = sec.mintAuthority === undefined || sec.freezeAuthority === undefined || sec.updateAuthority === undefined;
-    return lp === null || lp === undefined || missingAuthorities;
+    const sec = data.security;
+    if (!sec) return true;
+
+    const lpBurned = pickFirstPath(sec, [
+      'data.lpBurnedPercent',
+      'data.lpBurnedPct',
+      'data.lp_burned_percent',
+      'data.lp_burned_pct',
+      'data.liquidityBurned',
+      'data.liquidity_burned',
+      'data.security.lpBurnedPercent',
+      'data.security.lpBurnedPct',
+      'data.security.liquidityBurned',
+      'data.liquidityBurned.percent',
+      'data.markets.0.lpBurnedPercent',
+    ]);
+
+    const mintAuthority = getPath(sec, 'data.mintAuthority');
+    const freezeAuthority = getPath(sec, 'data.freezeAuthority');
+    const updateAuthority = getPath(sec, 'data.updateAuthority');
+
+    return lpBurned.value === null || mintAuthority === null || freezeAuthority === null || updateAuthority === null;
   }
 
-  resolveLpBurned(data) {
-    const birdeyeSec = data.security?.data || {};
-    const birdeyeCandidates = [
-      birdeyeSec.lpBurnedPercent,
-      birdeyeSec.lpBurnedPct,
-      birdeyeSec.lp_burned_percent,
-      birdeyeSec.lp_burned_pct,
-    ]
-      .map(parsePercent)
-      .filter((v) => v !== null);
+  extractMainPair(data) {
+    const markets = [];
 
-    if (birdeyeCandidates.length > 0) {
-      return { value: Math.max(...birdeyeCandidates), source: 'birdeye/token_security' };
+    const secMarkets = getPath(data.security, 'data.markets');
+    if (Array.isArray(secMarkets)) markets.push(...secMarkets);
+
+    const ovMarkets = getPath(data.overview, 'data.markets');
+    if (Array.isArray(ovMarkets)) markets.push(...ovMarkets);
+
+    const rugMarkets = data.rugcheck?.markets;
+    if (Array.isArray(rugMarkets)) markets.push(...rugMarkets);
+
+    if (markets.length === 0) {
+      return { address: null, liquidityUsd: null, dex: null, found: false };
     }
 
-    const rugcheckCandidates = [
-      data.rugcheck?.markets?.[0]?.lp?.burnPct,
-      data.rugcheck?.liquidityDetails?.lpBurnPct,
-      data.rugcheck?.liquidityDetails?.lpBurnedPct,
-    ]
-      .map(parsePercent)
-      .filter((v) => v !== null);
-
-    if (rugcheckCandidates.length > 0) {
-      return { value: Math.max(...rugcheckCandidates), source: 'rugcheck/report' };
+    let best = null;
+    let bestLiq = -1;
+    for (const m of markets) {
+      const liq = Number(m?.liquidity ?? m?.liquidityUsd ?? m?.liquidity_usd ?? 0);
+      if (liq > bestLiq) {
+        best = m;
+        bestLiq = liq;
+      }
     }
 
-    return { value: null, source: 'unknown' };
+    return {
+      address: best?.pairAddress || best?.address || best?.pair || best?.lpAddress || null,
+      liquidityUsd: bestLiq > 0 ? bestLiq : null,
+      dex: best?.dex || best?.source || best?.market || null,
+      found: Boolean(best),
+    };
+  }
+
+  extractLpMetric(data, kind) {
+    const birdeyePaths =
+      kind === 'burned'
+        ? [
+            'data.lpBurnedPercent',
+            'data.lpBurnedPct',
+            'data.lp_burned_percent',
+            'data.lp_burned_pct',
+            'data.liquidityBurned',
+            'data.liquidity_burned',
+            'data.security.lpBurnedPercent',
+            'data.security.lpBurnedPct',
+            'data.security.liquidityBurned',
+            'data.liquidityBurned.percent',
+            'data.markets.0.lpBurnedPercent',
+          ]
+        : [
+            'data.lpLockedPercent',
+            'data.lpLockedPct',
+            'data.lp_locked_percent',
+            'data.lp_locked_pct',
+            'data.liquidityLocked',
+            'data.liquidity_locked',
+            'data.security.lpLockedPercent',
+            'data.security.lpLockedPct',
+            'data.security.liquidityLocked',
+            'data.liquidityLocked.percent',
+            'data.markets.0.lpLockedPercent',
+          ];
+
+    const rugcheckPaths =
+      kind === 'burned'
+        ? ['markets.0.lp.burnPct', 'liquidityDetails.lpBurnPct', 'liquidityDetails.lpBurnedPct']
+        : ['markets.0.lp.lockPct', 'liquidityDetails.lpLockPct', 'liquidityDetails.lpLockedPct'];
+
+    const b = pickFirstPath(data.security, birdeyePaths);
+    const bNorm = parsePercent(b.value);
+    if (bNorm !== null) {
+      return { raw: b.value, percent: bNorm, source: 'birdeye/token_security', path: b.path };
+    }
+
+    const r = pickFirstPath(data.rugcheck, rugcheckPaths);
+    const rNorm = parsePercent(r.value);
+    if (rNorm !== null) {
+      return { raw: r.value, percent: rNorm, source: 'rugcheck/report', path: r.path };
+    }
+
+    return { raw: null, percent: null, source: null, path: null };
+  }
+
+  decideLpStatus(data, token) {
+    const mainPair = this.extractMainPair(data);
+    const burned = this.extractLpMetric(data, 'burned');
+    const locked = this.extractLpMetric(data, 'locked');
+
+    token.security.mainPairAddress = mainPair.address;
+    token.security.mainPairLiquidityUsd = mainPair.liquidityUsd;
+    token.security.mainPairDex = mainPair.dex;
+
+    token.security.lpBurnedPctRaw = burned.raw;
+    token.security.lpBurnedPct = burned.percent;
+    token.security.lpBurnedSource = burned.source;
+    token.security.lpBurnedPath = burned.path;
+
+    token.security.lpLockedPctRaw = locked.raw;
+    token.security.lpLockedPct = locked.percent;
+    token.security.lpLockedSource = locked.source;
+    token.security.lpLockedPath = locked.path;
+
+    if (!data.securityFetchOk && burned.percent === null && locked.percent === null) {
+      return { passed: false, reason: 'NO_SECURITY_DATA' };
+    }
+
+    if (!mainPair.found) {
+      return { passed: false, reason: 'MAIN_PAIR_NOT_FOUND' };
+    }
+
+    if (burned.percent !== null && burned.percent >= config.lpBurnedThreshold) {
+      return { passed: true, reason: 'PASS_BURNED' };
+    }
+
+    if (locked.percent !== null && locked.percent >= config.lpLockedThreshold) {
+      return { passed: true, reason: 'PASS_LOCKED' };
+    }
+
+    if (burned.percent === null && locked.percent === null) {
+      return { passed: false, reason: 'LP_BURNED_FIELD_MISSING' };
+    }
+
+    return { passed: false, reason: 'PERCENT_BELOW_THRESHOLD' };
   }
 
   mergeData(token, data) {
@@ -227,32 +374,30 @@ export class TokenMonitor {
     token.creationInfo = {
       source: data.creationInfo ? 'birdeye' : data.helius ? 'helius' : data.rugcheck ? 'rugcheck' : 'unknown',
       createdAt:
-        data.creationInfo?.data?.blockUnixTime ||
-        data.creationInfo?.data?.createdTime ||
-        data.rugcheck?.tokenMeta?.mintTime ||
-        token.liquidityAddedAt ||
+        normalizeEpochMaybe(data.creationInfo?.data?.blockUnixTime) ||
+        normalizeEpochMaybe(data.creationInfo?.data?.createdTime) ||
+        normalizeEpochMaybe(data.rugcheck?.tokenMeta?.mintTime) ||
+        normalizeEpochMaybe(token.liquidityAddedAt) ||
         token.discoveredAt,
     };
 
-    const birdeyeSec = data.security?.data || {};
     const mintAuthority = toNullish(
-      birdeyeSec.mintAuthority ?? data.helius?.result?.content?.metadata?.mintAuthority ?? data.rugcheck?.token?.mintAuthority,
+      getPath(data.security, 'data.mintAuthority') ?? data.helius?.result?.content?.metadata?.mintAuthority ?? data.rugcheck?.token?.mintAuthority,
     );
     const freezeAuthority = toNullish(
-      birdeyeSec.freezeAuthority ?? data.helius?.result?.content?.metadata?.freezeAuthority ?? data.rugcheck?.token?.freezeAuthority,
+      getPath(data.security, 'data.freezeAuthority') ?? data.helius?.result?.content?.metadata?.freezeAuthority ?? data.rugcheck?.token?.freezeAuthority,
     );
     const updateAuthority = toNullish(
-      birdeyeSec.updateAuthority ?? data.helius?.result?.authorities?.[0]?.address ?? data.rugcheck?.token?.updateAuthority,
+      getPath(data.security, 'data.updateAuthority') ?? data.helius?.result?.authorities?.[0]?.address ?? data.rugcheck?.token?.updateAuthority,
     );
-    const lp = this.resolveLpBurned(data);
 
-    token.security = {
-      mintAuthority,
-      freezeAuthority,
-      updateAuthority,
-      lpBurnedPct: lp.value,
-      lpBurnedSource: lp.source,
-    };
+    token.security.mintAuthority = mintAuthority;
+    token.security.freezeAuthority = freezeAuthority;
+    token.security.updateAuthority = updateAuthority;
+
+    const lp = this.decideLpStatus(data, token);
+    token.security.lpPassed = lp.passed;
+    token.security.lpReason = lp.reason;
 
     const fdv = Number(
       data.overview?.data?.fdv ||
@@ -273,13 +418,10 @@ export class TokenMonitor {
 
   evaluateRules(token) {
     const failed = [];
-    const lpBurnedPct = token.security.lpBurnedPct;
-
-    if (lpBurnedPct === null || lpBurnedPct <= 95) failed.push('LP Burned <= 95%');
+    if (!token.security.lpPassed) failed.push(`LP_CHECK_FAILED:${token.security.lpReason || 'UNKNOWN'}`);
     if (token.security.mintAuthority !== null) failed.push('Mint Authority not null');
     if (token.security.freezeAuthority !== null) failed.push('Freeze Authority not null');
     if (token.security.updateAuthority !== null) failed.push('Update Authority not null');
-
     return { ok: failed.length === 0, failed };
   }
 
@@ -323,6 +465,7 @@ export class TokenMonitor {
       metadata: null,
       helius: null,
       rugcheck: null,
+      securityFetchOk: security.status === 'fulfilled',
     });
 
     token.stats.txCount = token.stats.txCount ?? 0;

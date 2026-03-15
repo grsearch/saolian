@@ -11,6 +11,8 @@
   - Birdeye `v3 token meta-data`
   - Helius / Rugcheck 作为兜底数据源
 - LP Burned 判断优先使用 Birdeye `token_security`，仅当关键字段缺失时才回退 Rugcheck（减少免费接口限频影响）。
+- 先从 markets 中选 liquidity 最大的主池，再做 LP 判定，避免误取小池/废弃池。
+- 页面增加 LP 判定调试字段：raw/normalized/source/reason/mainPair。
 - 四条规则用于分流白名单/黑名单：
   - LP burned > 95%
   - mintAuthority = null
@@ -37,6 +39,8 @@ node src/server.js
 - `DISCOVERY_SECONDS`（可选，默认 60）
 - `REFRESH_SECONDS`（可选，默认 30）
 - `NEW_LISTING_PAGE_SIZE`（可选，默认 50）
+- `LP_BURNED_THRESHOLD`（可选，默认 99.5）
+- `LP_LOCKED_THRESHOLD`（可选，默认 95）
 
 可选覆盖：
 - `BIRDEYE_API_URL`（默认 `https://public-api.birdeye.so`）
