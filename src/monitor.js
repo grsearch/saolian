@@ -4,44 +4,43 @@ const now = () => Date.now();
 
 async function requestJson(url, options = {}) {
   const res = await fetch(url, options);
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} for ${url}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   return res.json();
 }
 
 function toNullish(value) {
   if (value === null || value === undefined) return null;
-  const s = String(value).toLowerCase();
-  if (s === 'null' || s === 'none' || s === '') return null;
+  const s = String(value).trim().toLowerCase();
+  if (!s || s === 'null' || s === 'none') return null;
   return value;
 }
 
-function normalizeAddress(event) {
-  return event?.address || event?.tokenAddress || event?.baseAddress || event?.mint || event?.baseMint || event?.token || null;
-}
-
-function normalizePair(event) {
-  return event?.pairAddress || event?.pair || event?.lpAddress || null;
+function normalizeArrayResponse(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload?.data?.items)) return payload.data.items;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.items)) return payload.items;
+  return [];
 }
 
 export class TokenMonitor {
   constructor() {
     this.tokens = new Map();
-    this.pairs = new Map();
     this.clients = new Set();
-    this.birdeyeSocket = null;
+    this.seenAddresses = new Set();
     this.startedAt = now();
+    this.discoveryRunning = false;
   }
 
   start() {
-    this.connectBirdeye();
-    this.cron = setInterval(() => this.tick().catch((e) => console.error(e)), config.refreshSeconds * 1000);
+    this.discoveryLoop().catch((e) => console.error('Initial discovery failed:', e.message));
+    this.discoveryTimer = setInterval(() => this.discoveryLoop().catch((e) => console.error('Discovery failed:', e.message)), config.discoverySeconds * 1000);
+    this.refreshTimer = setInterval(() => this.tick().catch((e) => console.error('Tick failed:', e.message)), config.refreshSeconds * 1000);
   }
 
   stop() {
-    if (this.cron) clearInterval(this.cron);
-    this.birdeyeSocket?.close();
+    if (this.discoveryTimer) clearInterval(this.discoveryTimer);
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
   }
 
   subscribeClient(res) {
@@ -66,84 +65,43 @@ export class TokenMonitor {
       blacklist: list.filter((t) => t.status === 'blacklist').sort((a, b) => b.discoveredAt - a.discoveredAt),
       pool: list.filter((t) => t.status === 'watching').length,
       total: list.length,
+      seenCount: this.seenAddresses.size,
     };
   }
 
-  connectBirdeye() {
+  async discoveryLoop() {
+    if (this.discoveryRunning) return;
+    this.discoveryRunning = true;
     try {
-      const wsUrl = config.birdeyeApiKey
-        ? `${config.birdeyeWsUrl}${config.birdeyeWsUrl.includes('?') ? '&' : '?'}x-api-key=${config.birdeyeApiKey}`
-        : config.birdeyeWsUrl;
-      this.birdeyeSocket = new WebSocket(wsUrl);
-    } catch (error) {
-      console.error('Birdeye websocket init failed:', error.message);
-      return;
-    }
-
-    this.birdeyeSocket.addEventListener('open', () => {
-      this.sendWs({ type: 'SUBSCRIBE_TOKEN_NEW_LISTING' });
-      this.sendWs({ type: 'SUBSCRIBE_NEW_PAIR' });
-      console.log('Connected Birdeye websocket.');
-    });
-
-    this.birdeyeSocket.addEventListener('message', (event) => {
-      try {
-        this.handleWsMessage(typeof event.data === 'string' ? event.data : String(event.data));
-      } catch (error) {
-        console.error('WS parse error:', error.message);
+      const listed = await this.fetchBirdeyeNewListing();
+      for (const item of listed) {
+        const address = item?.address;
+        if (!address || this.seenAddresses.has(address)) continue;
+        this.seenAddresses.add(address);
+        await this.onNewToken(item);
       }
-    });
-
-    this.birdeyeSocket.addEventListener('close', () => {
-      console.warn('Birdeye websocket closed, reconnecting in 5s...');
-      setTimeout(() => this.connectBirdeye(), 5000);
-    });
-
-    this.birdeyeSocket.addEventListener('error', (err) => {
-      console.error('Birdeye websocket error', err.message || err);
-    });
-  }
-
-  sendWs(obj) {
-    if (this.birdeyeSocket?.readyState === WebSocket.OPEN) {
-      this.birdeyeSocket.send(JSON.stringify(obj));
-    }
-  }
-
-  handleWsMessage(raw) {
-    const parsed = JSON.parse(raw);
-    const type = parsed?.type || parsed?.channel || parsed?.topic;
-    const payload = parsed?.data || parsed?.payload || parsed;
-
-    if (String(type).includes('NEW_LISTING') || payload?.event === 'new_token') {
-      this.onNewToken(payload);
-      return;
-    }
-
-    if (String(type).includes('NEW_PAIR') || payload?.event === 'new_pair') {
-      this.onNewPair(payload);
-      return;
-    }
-
-    if (String(type).includes('TRADE')) {
-      this.onTrade(payload);
+      this.publish('update', this.getState());
+    } finally {
+      this.discoveryRunning = false;
     }
   }
 
   async onNewToken(event) {
-    const address = normalizeAddress(event);
+    const address = event?.address;
     if (!address || this.tokens.has(address)) return;
 
     this.tokens.set(address, {
       address,
       symbol: event?.symbol || 'UNKNOWN',
+      name: event?.name || '',
+      source: event?.source || '',
       discoveredAt: now(),
-      pairAddress: normalizePair(event),
+      liquidityAddedAt: event?.liquidityAddedAt || null,
       status: 'watching',
       reasons: [],
       stats: {
         holders: null,
-        liquidity: null,
+        liquidity: Number(event?.liquidity || 0) || null,
         fdvOrMcap: null,
         lpOverFdv: null,
         top10Percent: null,
@@ -157,57 +115,34 @@ export class TokenMonitor {
     await this.enrichAndClassify(address);
   }
 
-  async onNewPair(event) {
-    const pair = normalizePair(event);
-    if (!pair || this.pairs.has(pair)) return;
-    this.pairs.set(pair, { ...event, discoveredAt: now() });
-
-    const tokenAddress = normalizeAddress(event);
-    if (tokenAddress && !this.tokens.has(tokenAddress)) {
-      await this.onNewToken({ ...event, address: tokenAddress, pairAddress: pair });
-    }
-  }
-
-  onTrade(event) {
-    const address = normalizeAddress(event);
-    if (!address) return;
-    const token = this.tokens.get(address);
-    if (!token || token.status !== 'whitelist') return;
-
-    token.stats.txCount += 1;
-    const side = String(event?.side || event?.type || '').toLowerCase();
-    if (side.includes('buy')) token.stats.buyCount += 1;
-    if (side.includes('sell')) token.stats.sellCount += 1;
-    token.lastUpdateAt = now();
-
-    this.publish('update', this.getState());
-  }
-
   async enrichAndClassify(address) {
     const token = this.tokens.get(address);
     if (!token) return;
 
-    const [birdeye, helius, rugcheck] = await Promise.allSettled([
-      this.fetchBirdeyeToken(address),
+    const [creationInfo, security, overview, metadata, helius, rugcheck] = await Promise.allSettled([
+      this.fetchBirdeyeCreationInfo(address),
+      this.fetchBirdeyeSecurity(address),
+      this.fetchBirdeyeTokenOverview(address),
+      this.fetchBirdeyeMetadata(address),
       this.fetchHeliusAsset(address),
       this.fetchRugcheck(address),
     ]);
 
     const data = {
-      birdeye: birdeye.status === 'fulfilled' ? birdeye.value : null,
+      creationInfo: creationInfo.status === 'fulfilled' ? creationInfo.value : null,
+      security: security.status === 'fulfilled' ? security.value : null,
+      overview: overview.status === 'fulfilled' ? overview.value : null,
+      metadata: metadata.status === 'fulfilled' ? metadata.value : null,
       helius: helius.status === 'fulfilled' ? helius.value : null,
       rugcheck: rugcheck.status === 'fulfilled' ? rugcheck.value : null,
     };
 
     this.mergeData(token, data);
-
     const rules = this.evaluateRules(token);
     token.reasons = rules.failed;
     token.status = rules.ok ? 'whitelist' : 'blacklist';
 
     if (token.status === 'whitelist') {
-      this.sendWs({ type: 'SUBSCRIBE_TOKEN_TRADES', data: { address } });
-      if (token.pairAddress) this.sendWs({ type: 'SUBSCRIBE_PAIR_TRADES', data: { pairAddress: token.pairAddress } });
       await this.refreshMarketStats(token);
     }
 
@@ -215,49 +150,62 @@ export class TokenMonitor {
   }
 
   mergeData(token, data) {
-    token.symbol = data.birdeye?.data?.symbol || data.rugcheck?.tokenMeta?.symbol || token.symbol;
+    token.symbol = data.metadata?.data?.symbol || data.overview?.data?.symbol || data.rugcheck?.tokenMeta?.symbol || token.symbol;
+    token.name = data.metadata?.data?.name || token.name;
 
     token.creationInfo = {
-      source: data.helius ? 'helius' : data.birdeye ? 'birdeye' : data.rugcheck ? 'rugcheck' : 'unknown',
-      createdAt: data.birdeye?.data?.createdAt || data.rugcheck?.tokenMeta?.mintTime || token.discoveredAt,
+      source: data.creationInfo ? 'birdeye' : data.helius ? 'helius' : data.rugcheck ? 'rugcheck' : 'unknown',
+      createdAt:
+        data.creationInfo?.data?.blockUnixTime ||
+        data.creationInfo?.data?.createdTime ||
+        data.rugcheck?.tokenMeta?.mintTime ||
+        token.liquidityAddedAt ||
+        token.discoveredAt,
     };
 
-    const mintAuthority = toNullish(data.helius?.result?.content?.metadata?.mintAuthority ?? data.rugcheck?.token?.mintAuthority);
-    const freezeAuthority = toNullish(data.helius?.result?.content?.metadata?.freezeAuthority ?? data.rugcheck?.token?.freezeAuthority);
-    const updateAuthority = toNullish(data.helius?.result?.authorities?.[0]?.address ?? data.rugcheck?.token?.updateAuthority);
+    const birdeyeSec = data.security?.data || {};
+    const mintAuthority = toNullish(
+      birdeyeSec.mintAuthority ?? data.helius?.result?.content?.metadata?.mintAuthority ?? data.rugcheck?.token?.mintAuthority,
+    );
+    const freezeAuthority = toNullish(
+      birdeyeSec.freezeAuthority ?? data.helius?.result?.content?.metadata?.freezeAuthority ?? data.rugcheck?.token?.freezeAuthority,
+    );
+    const updateAuthority = toNullish(
+      birdeyeSec.updateAuthority ?? data.helius?.result?.authorities?.[0]?.address ?? data.rugcheck?.token?.updateAuthority,
+    );
     const lpBurnedPct = Number(
-      data.rugcheck?.markets?.[0]?.lp?.burnPct ??
-      data.rugcheck?.liquidityDetails?.lpBurnPct ??
-      data.birdeye?.data?.lpBurnedPct ??
-      0,
+      birdeyeSec.lpBurnedPercent ??
+        birdeyeSec.lpBurnedPct ??
+        data.rugcheck?.markets?.[0]?.lp?.burnPct ??
+        data.rugcheck?.liquidityDetails?.lpBurnPct ??
+        0,
     );
 
-    token.security = {
-      mintAuthority,
-      freezeAuthority,
-      updateAuthority,
-      lpBurnedPct,
-    };
+    token.security = { mintAuthority, freezeAuthority, updateAuthority, lpBurnedPct };
 
-    const fdv = Number(data.birdeye?.data?.fdv || data.birdeye?.data?.marketCap || data.rugcheck?.tokenMeta?.marketCap || 0);
-    const liquidity = Number(data.birdeye?.data?.liquidity || data.rugcheck?.markets?.[0]?.liquidity || 0);
+    const fdv = Number(
+      data.overview?.data?.fdv ||
+        data.overview?.data?.marketCap ||
+        data.metadata?.data?.fdv ||
+        data.rugcheck?.tokenMeta?.marketCap ||
+        0,
+    );
+    const liquidity = Number(data.overview?.data?.liquidity || token.stats.liquidity || data.rugcheck?.markets?.[0]?.liquidity || 0);
 
     token.stats.fdvOrMcap = fdv || null;
     token.stats.liquidity = liquidity || null;
     token.stats.lpOverFdv = fdv > 0 && liquidity > 0 ? Number((liquidity / fdv).toFixed(4)) : null;
-    token.stats.top10Percent = Number(data.rugcheck?.token?.topHoldersPct || 0) || null;
-    token.stats.holders = Number(data.birdeye?.data?.holder || data.rugcheck?.token?.holderCount || 0) || null;
+    token.stats.top10Percent = Number(data.security?.data?.top10HolderPercent || data.rugcheck?.token?.topHoldersPct || 0) || null;
+    token.stats.holders = Number(data.overview?.data?.holder || data.security?.data?.holder || data.rugcheck?.token?.holderCount || 0) || null;
     token.lastUpdateAt = now();
   }
 
   evaluateRules(token) {
     const failed = [];
-
     if ((token.security.lpBurnedPct ?? 0) <= 95) failed.push('LP Burned <= 95%');
     if (token.security.mintAuthority !== null) failed.push('Mint Authority not null');
     if (token.security.freezeAuthority !== null) failed.push('Freeze Authority not null');
     if (token.security.updateAuthority !== null) failed.push('Update Authority not null');
-
     return { ok: failed.length === 0, failed };
   }
 
@@ -270,42 +218,75 @@ export class TokenMonitor {
       }
       if (token.status === 'blacklist') {
         const ageMs = stamp - token.discoveredAt;
-        if (ageMs > config.blacklistTtlMinutes * 60 * 1000) {
-          this.tokens.delete(token.address);
-        }
+        if (ageMs > config.blacklistTtlMinutes * 60 * 1000) this.tokens.delete(token.address);
       }
     }
-
     this.publish('update', this.getState());
   }
 
   applyWhitelistExit(token, stamp) {
     const ageMs = stamp - token.discoveredAt;
     const fdv = token.stats.fdvOrMcap || 0;
-
     if (ageMs > config.whitelistExitHours * 3600 * 1000) {
       this.tokens.delete(token.address);
       return;
     }
-
     if (ageMs > config.staleLowCapHours * 3600 * 1000 && fdv < config.lowCapThreshold) {
       this.tokens.delete(token.address);
     }
   }
 
   async refreshMarketStats(token) {
-    try {
-      const data = await this.fetchBirdeyeToken(token.address);
-      this.mergeData(token, { birdeye: data, helius: null, rugcheck: null });
-    } catch {
-      // ignore transient refresh errors
-    }
+    const [overview, security] = await Promise.allSettled([
+      this.fetchBirdeyeTokenOverview(token.address),
+      this.fetchBirdeyeSecurity(token.address),
+    ]);
+
+    this.mergeData(token, {
+      overview: overview.status === 'fulfilled' ? overview.value : null,
+      security: security.status === 'fulfilled' ? security.value : null,
+      creationInfo: null,
+      metadata: null,
+      helius: null,
+      rugcheck: null,
+    });
+
+    token.stats.txCount = token.stats.txCount ?? 0;
+    token.stats.buyCount = token.stats.buyCount ?? 0;
+    token.stats.sellCount = token.stats.sellCount ?? 0;
   }
 
-  async fetchBirdeyeToken(address) {
-    if (!config.birdeyeApiKey) return null;
+  birdeyeHeaders() {
+    return {
+      'x-chain': 'solana',
+      ...(config.birdeyeApiKey ? { 'x-api-key': config.birdeyeApiKey } : {}),
+    };
+  }
+
+  async fetchBirdeyeNewListing() {
+    const url = `${config.birdeyeApiUrl}/defi/v2/tokens/new_listing?limit=${config.maxNewListingPageSize}`;
+    const json = await requestJson(url, { headers: this.birdeyeHeaders() });
+    return normalizeArrayResponse(json);
+  }
+
+  async fetchBirdeyeCreationInfo(address) {
+    const url = `${config.birdeyeApiUrl}/defi/token_creation_info?address=${address}`;
+    return requestJson(url, { headers: this.birdeyeHeaders() });
+  }
+
+  async fetchBirdeyeSecurity(address) {
+    const url = `${config.birdeyeApiUrl}/defi/token_security?address=${address}`;
+    return requestJson(url, { headers: this.birdeyeHeaders() });
+  }
+
+  async fetchBirdeyeMetadata(address) {
+    const url = `${config.birdeyeApiUrl}/defi/v3/token/meta-data/single?address=${address}`;
+    return requestJson(url, { headers: this.birdeyeHeaders() });
+  }
+
+  async fetchBirdeyeTokenOverview(address) {
     const url = `${config.birdeyeApiUrl}/defi/token_overview?address=${address}`;
-    return requestJson(url, { headers: { 'x-api-key': config.birdeyeApiKey } });
+    return requestJson(url, { headers: this.birdeyeHeaders() });
   }
 
   async fetchHeliusAsset(address) {
@@ -314,12 +295,7 @@ export class TokenMonitor {
     return requestJson(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: '1',
-        method: 'getAsset',
-        params: { id: address },
-      }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: '1', method: 'getAsset', params: { id: address } }),
     });
   }
 
