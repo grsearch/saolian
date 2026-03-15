@@ -23,66 +23,33 @@ function normalizeArrayResponse(payload) {
   return [];
 }
 
-function parsePercent(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'string') {
-    const cleaned = value.replace('%', '').trim();
-    const num = Number(cleaned);
-    if (!Number.isFinite(num)) return null;
-    if (num >= 0 && num <= 1) return num * 100;
-    return num;
+function parseNumber(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    const n = Number(v.replaceAll(',', '').trim());
+    return Number.isFinite(n) ? n : null;
   }
-  const num = Number(value);
-  if (!Number.isFinite(num)) return null;
-  if (num >= 0 && num <= 1) return num * 100;
-  return num;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
-function getPath(obj, path) {
-  if (!obj) return null;
-  const segs = path.split('.');
-  let cur = obj;
-  for (const seg of segs) {
-    if (cur === null || cur === undefined) return null;
-    if (/^\d+$/.test(seg)) {
-      cur = cur[Number(seg)];
-    } else {
-      cur = cur[seg];
-    }
+function parsePercent(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string') {
+    const n = Number(v.replace('%', '').trim());
+    if (!Number.isFinite(n)) return null;
+    return n >= 0 && n <= 1 ? n * 100 : n;
   }
-  return cur ?? null;
-}
-
-function hasPath(obj, path) {
-  if (!obj) return false;
-  const segs = path.split('.');
-  let cur = obj;
-  for (const seg of segs) {
-    if (cur === null || cur === undefined) return false;
-    if (/^\d+$/.test(seg)) {
-      if (!Array.isArray(cur) || Number(seg) >= cur.length) return false;
-      cur = cur[Number(seg)];
-      continue;
-    }
-    if (!(seg in cur)) return false;
-    cur = cur[seg];
-  }
-  return true;
-}
-
-function pickFirstPath(obj, paths) {
-  for (const path of paths) {
-    const value = getPath(obj, path);
-    if (value !== null && value !== undefined) return { value, path };
-  }
-  return { value: null, path: null };
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return n >= 0 && n <= 1 ? n * 100 : n;
 }
 
 function normalizeEpochMaybe(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return null;
-  if (n < 10_000_000_000) return n * 1000;
-  return n;
+  return n < 10_000_000_000 ? n * 1000 : n;
 }
 
 export class TokenMonitor {
@@ -163,7 +130,7 @@ export class TokenMonitor {
       reasons: [],
       stats: {
         holders: null,
-        liquidity: Number(event?.liquidity || 0) || null,
+        liquidity: parseNumber(event?.liquidity),
         fdvOrMcap: null,
         lpOverFdv: null,
         top10Percent: null,
@@ -172,22 +139,13 @@ export class TokenMonitor {
         sellCount: 0,
       },
       security: {
-        lpBurnedPctRaw: null,
+        mintAuthority: null,
+        freezeAuthority: null,
+        updateAuthority: null,
+        lpBurned: null,
         lpBurnedPct: null,
         lpBurnedSource: null,
-        lpBurnedPath: null,
-        lpLockedPctRaw: null,
-        lpLockedPct: null,
-        lpLockedSource: null,
-        lpLockedPath: null,
-        lpPassed: false,
-        lpReason: null,
-        mainPairAddress: null,
-        mainPairLiquidityUsd: null,
-        mainPairDex: null,
-        rugcheckTried: false,
-        rugcheckUsed: false,
-        securityFetchOk: false,
+        burnCheckedAt: null,
       },
     });
 
@@ -212,244 +170,89 @@ export class TokenMonitor {
       overview: overview.status === 'fulfilled' ? overview.value : null,
       metadata: metadata.status === 'fulfilled' ? metadata.value : null,
       helius: helius.status === 'fulfilled' ? helius.value : null,
-      rugcheck: null,
-      securityFetchOk: security.status === 'fulfilled',
     };
 
-    const needRugcheck = this.needsRugcheckFallback(data);
-    token.security.rugcheckTried = needRugcheck;
-    if (needRugcheck) {
-      try {
-        data.rugcheck = await this.fetchRugcheck(address);
-      } catch (error) {
-        console.warn(`Rugcheck fallback failed for ${address}:`, error.message);
-      }
-    }
-
     this.mergeData(token, data);
+
     const rules = this.evaluateRules(token);
     token.reasons = rules.failed;
     token.status = rules.ok ? 'whitelist' : 'blacklist';
 
     if (token.status === 'whitelist') {
-      await this.refreshMarketStats(token);
+      await this.refreshWhitelistBurned(token);
     }
 
     this.publish('update', this.getState());
   }
 
-  needsRugcheckFallback(data) {
-    const sec = data.security;
-    if (!sec) return true;
-
-    const lpBurned = pickFirstPath(sec, [
-      'data.lpBurnedPercent',
-      'data.lpBurnedPct',
-      'data.lp_burned_percent',
-      'data.lp_burned_pct',
-      'data.liquidityBurned',
-      'data.liquidity_burned',
-      'data.security.lpBurnedPercent',
-      'data.security.lpBurnedPct',
-      'data.security.liquidityBurned',
-      'data.liquidityBurned.percent',
-      'data.markets.0.lpBurnedPercent',
-    ]);
-
-    const hasMintAuthorityField = hasPath(sec, 'data.mintAuthority');
-    const hasFreezeAuthorityField = hasPath(sec, 'data.freezeAuthority');
-    const hasUpdateAuthorityField = hasPath(sec, 'data.updateAuthority');
-
-    return lpBurned.path === null || !hasMintAuthorityField || !hasFreezeAuthorityField || !hasUpdateAuthorityField;
-  }
-
-  extractMainPair(data) {
-    const markets = [];
-
-    const secMarkets = getPath(data.security, 'data.markets');
-    if (Array.isArray(secMarkets)) markets.push(...secMarkets);
-
-    const ovMarkets = getPath(data.overview, 'data.markets');
-    if (Array.isArray(ovMarkets)) markets.push(...ovMarkets);
-
-    const rugMarkets = data.rugcheck?.markets;
-    if (Array.isArray(rugMarkets)) markets.push(...rugMarkets);
-
-    if (markets.length === 0) {
-      return { address: null, liquidityUsd: null, dex: null, found: false };
-    }
-
-    let best = null;
-    let bestLiq = -1;
-    for (const m of markets) {
-      const liq = Number(m?.liquidity ?? m?.liquidityUsd ?? m?.liquidity_usd ?? 0);
-      if (liq > bestLiq) {
-        best = m;
-        bestLiq = liq;
-      }
-    }
-
-    return {
-      address: best?.pairAddress || best?.address || best?.pair || best?.lpAddress || null,
-      liquidityUsd: bestLiq > 0 ? bestLiq : null,
-      dex: best?.dex || best?.source || best?.market || null,
-      found: Boolean(best),
-    };
-  }
-
-  extractLpMetric(data, kind) {
-    const birdeyePaths =
-      kind === 'burned'
-        ? [
-            'data.lpBurnedPercent',
-            'data.lpBurnedPct',
-            'data.lp_burned_percent',
-            'data.lp_burned_pct',
-            'data.liquidityBurned',
-            'data.liquidity_burned',
-            'data.security.lpBurnedPercent',
-            'data.security.lpBurnedPct',
-            'data.security.liquidityBurned',
-            'data.liquidityBurned.percent',
-            'data.markets.0.lpBurnedPercent',
-          ]
-        : [
-            'data.lpLockedPercent',
-            'data.lpLockedPct',
-            'data.lp_locked_percent',
-            'data.lp_locked_pct',
-            'data.liquidityLocked',
-            'data.liquidity_locked',
-            'data.security.lpLockedPercent',
-            'data.security.lpLockedPct',
-            'data.security.liquidityLocked',
-            'data.liquidityLocked.percent',
-            'data.markets.0.lpLockedPercent',
-          ];
-
-    const rugcheckPaths =
-      kind === 'burned'
-        ? ['markets.0.lp.burnPct', 'liquidityDetails.lpBurnPct', 'liquidityDetails.lpBurnedPct']
-        : ['markets.0.lp.lockPct', 'liquidityDetails.lpLockPct', 'liquidityDetails.lpLockedPct'];
-
-    const b = pickFirstPath(data.security, birdeyePaths);
-    const bNorm = parsePercent(b.value);
-    if (bNorm !== null) {
-      return { raw: b.value, percent: bNorm, source: 'birdeye/token_security', path: b.path };
-    }
-
-    const r = pickFirstPath(data.rugcheck, rugcheckPaths);
-    const rNorm = parsePercent(r.value);
-    if (rNorm !== null) {
-      return { raw: r.value, percent: rNorm, source: 'rugcheck/report', path: r.path };
-    }
-
-    return { raw: null, percent: null, source: null, path: null };
-  }
-
-  decideLpStatus(data, token) {
-    const mainPair = this.extractMainPair(data);
-    const burned = this.extractLpMetric(data, 'burned');
-    const locked = this.extractLpMetric(data, 'locked');
-
-    token.security.mainPairAddress = mainPair.address;
-    token.security.mainPairLiquidityUsd = mainPair.liquidityUsd;
-    token.security.mainPairDex = mainPair.dex;
-
-    token.security.lpBurnedPctRaw = burned.raw;
-    token.security.lpBurnedPct = burned.percent;
-    token.security.lpBurnedSource = burned.source;
-    token.security.lpBurnedPath = burned.path;
-
-    token.security.lpLockedPctRaw = locked.raw;
-    token.security.lpLockedPct = locked.percent;
-    token.security.lpLockedSource = locked.source;
-    token.security.lpLockedPath = locked.path;
-
-    if (!data.securityFetchOk && burned.percent === null && locked.percent === null) {
-      return { passed: false, reason: 'NO_SECURITY_DATA' };
-    }
-
-    if (!mainPair.found) {
-      return { passed: false, reason: 'MAIN_PAIR_NOT_FOUND' };
-    }
-
-    if (burned.percent !== null && burned.percent >= config.lpBurnedThreshold) {
-      return { passed: true, reason: 'PASS_BURNED' };
-    }
-
-    if (locked.percent !== null && locked.percent >= config.lpLockedThreshold) {
-      return { passed: true, reason: 'PASS_LOCKED' };
-    }
-
-    if (burned.percent === null && locked.percent === null) {
-      if (config.allowUnknownLp) {
-        return { passed: true, reason: 'LP_UNKNOWN_ALLOWED' };
-      }
-      return { passed: false, reason: 'LP_BURNED_FIELD_MISSING' };
-    }
-
-    return { passed: false, reason: 'PERCENT_BELOW_THRESHOLD' };
-  }
-
   mergeData(token, data) {
-    token.symbol = data.metadata?.data?.symbol || data.overview?.data?.symbol || data.rugcheck?.tokenMeta?.symbol || token.symbol;
+    token.symbol = data.metadata?.data?.symbol || data.overview?.data?.symbol || token.symbol;
     token.name = data.metadata?.data?.name || token.name;
 
     token.creationInfo = {
-      source: data.creationInfo ? 'birdeye' : data.helius ? 'helius' : data.rugcheck ? 'rugcheck' : 'unknown',
+      source: data.creationInfo ? 'birdeye' : data.helius ? 'helius' : 'unknown',
       createdAt:
         normalizeEpochMaybe(data.creationInfo?.data?.blockUnixTime) ||
         normalizeEpochMaybe(data.creationInfo?.data?.createdTime) ||
-        normalizeEpochMaybe(data.rugcheck?.tokenMeta?.mintTime) ||
         normalizeEpochMaybe(token.liquidityAddedAt) ||
         token.discoveredAt,
     };
 
-    const mintAuthority = toNullish(
-      getPath(data.security, 'data.mintAuthority') ?? data.helius?.result?.content?.metadata?.mintAuthority ?? data.rugcheck?.token?.mintAuthority,
-    );
-    const freezeAuthority = toNullish(
-      getPath(data.security, 'data.freezeAuthority') ?? data.helius?.result?.content?.metadata?.freezeAuthority ?? data.rugcheck?.token?.freezeAuthority,
-    );
-    const updateAuthority = toNullish(
-      getPath(data.security, 'data.updateAuthority') ?? data.helius?.result?.authorities?.[0]?.address ?? data.rugcheck?.token?.updateAuthority,
-    );
+    token.security.mintAuthority = toNullish(data.security?.data?.mintAuthority ?? data.helius?.result?.content?.metadata?.mintAuthority);
+    token.security.freezeAuthority = toNullish(data.security?.data?.freezeAuthority ?? data.helius?.result?.content?.metadata?.freezeAuthority);
+    token.security.updateAuthority = toNullish(data.security?.data?.updateAuthority ?? data.helius?.result?.authorities?.[0]?.address);
 
-    token.security.mintAuthority = mintAuthority;
-    token.security.freezeAuthority = freezeAuthority;
-    token.security.updateAuthority = updateAuthority;
-    token.security.securityFetchOk = Boolean(data.securityFetchOk);
-    token.security.rugcheckUsed = Boolean(data.rugcheck);
+    const fdv = parseNumber(data.overview?.data?.fdv) ?? parseNumber(data.overview?.data?.marketCap) ?? parseNumber(data.metadata?.data?.fdv);
+    const liquidity =
+      parseNumber(data.overview?.data?.liquidity) ??
+      parseNumber(data.overview?.data?.liquidityUsd) ??
+      parseNumber(data.overview?.data?.liquidity_usd) ??
+      token.stats.liquidity;
 
-    const lp = this.decideLpStatus(data, token);
-    token.security.lpPassed = lp.passed;
-    token.security.lpReason = lp.reason;
-
-    const fdv = Number(
-      data.overview?.data?.fdv ||
-        data.overview?.data?.marketCap ||
-        data.metadata?.data?.fdv ||
-        data.rugcheck?.tokenMeta?.marketCap ||
-        0,
-    );
-    const liquidity = Number(data.overview?.data?.liquidity || token.stats.liquidity || data.rugcheck?.markets?.[0]?.liquidity || 0);
-
-    token.stats.fdvOrMcap = fdv || null;
-    token.stats.liquidity = liquidity || null;
-    token.stats.lpOverFdv = fdv > 0 && liquidity > 0 ? Number((liquidity / fdv).toFixed(4)) : null;
-    token.stats.top10Percent = Number(data.security?.data?.top10HolderPercent || data.rugcheck?.token?.topHoldersPct || 0) || null;
-    token.stats.holders = Number(data.overview?.data?.holder || data.security?.data?.holder || data.rugcheck?.token?.holderCount || 0) || null;
+    token.stats.fdvOrMcap = fdv;
+    token.stats.liquidity = liquidity;
+    token.stats.lpOverFdv = fdv && liquidity ? Number((liquidity / fdv).toFixed(4)) : null;
+    token.stats.top10Percent = parseNumber(data.security?.data?.top10HolderPercent);
+    token.stats.holders = parseNumber(data.overview?.data?.holder) ?? parseNumber(data.security?.data?.holder);
     token.lastUpdateAt = now();
   }
 
   evaluateRules(token) {
     const failed = [];
-    if (!token.security.lpPassed) failed.push(`LP_CHECK_FAILED:${token.security.lpReason || 'UNKNOWN'}`);
+    const lpRatio = token.stats.lpOverFdv;
+    if (lpRatio === null || lpRatio <= config.lpOverFdvThreshold) {
+      failed.push(`LP/FDV <= ${(config.lpOverFdvThreshold * 100).toFixed(0)}%`);
+    }
     if (token.security.mintAuthority !== null) failed.push('Mint Authority not null');
     if (token.security.freezeAuthority !== null) failed.push('Freeze Authority not null');
     if (token.security.updateAuthority !== null) failed.push('Update Authority not null');
     return { ok: failed.length === 0, failed };
+  }
+
+  async refreshWhitelistBurned(token) {
+    try {
+      const rug = await this.fetchRugcheck(token.address);
+      const markets = Array.isArray(rug?.markets) ? rug.markets : [];
+      let best = null;
+      let bestLiq = -1;
+      for (const m of markets) {
+        const liq = parseNumber(m?.liquidity) ?? 0;
+        if (liq > bestLiq) {
+          best = m;
+          bestLiq = liq;
+        }
+      }
+
+      const burnPct = parsePercent(best?.lp?.burnPct ?? rug?.liquidityDetails?.lpBurnPct ?? rug?.liquidityDetails?.lpBurnedPct);
+      token.security.lpBurnedPct = burnPct;
+      token.security.lpBurned = burnPct !== null ? burnPct >= 99.5 : null;
+      token.security.lpBurnedSource = 'rugcheck/report';
+      token.security.burnCheckedAt = now();
+    } catch (error) {
+      token.security.lpBurnedSource = 'rugcheck_failed';
+      token.security.burnCheckedAt = now();
+      console.warn(`Rugcheck whitelist burn refresh failed for ${token.address}:`, error.message);
+    }
   }
 
   async tick() {
@@ -457,6 +260,9 @@ export class TokenMonitor {
     for (const token of this.tokens.values()) {
       if (token.status === 'whitelist') {
         await this.refreshMarketStats(token);
+        if (!token.security.burnCheckedAt || stamp - token.security.burnCheckedAt > config.rugcheckRefreshMinutes * 60 * 1000) {
+          await this.refreshWhitelistBurned(token);
+        }
         this.applyWhitelistExit(token, stamp);
       }
       if (token.status === 'blacklist') {
@@ -491,8 +297,6 @@ export class TokenMonitor {
       creationInfo: null,
       metadata: null,
       helius: null,
-      rugcheck: null,
-      securityFetchOk: security.status === 'fulfilled',
     });
 
     token.stats.txCount = token.stats.txCount ?? 0;

@@ -1,25 +1,23 @@
 # SOL 新币扫描程序
 
-基于你的规则实现（已改为 **API 轮询发现新币**）：
+基于你的最新要求实现（先 LP/FDV，再 authority，再白名单补查 burned）：
 
 - 每 60 秒轮询 Birdeye `defi/v2/tokens/new_listing`，发现 Solana 新上市代币。
 - 对新地址做去重（`seenAddresses`），避免重复处理。
-- 对每个新币并行补查：
+- 对每个新币补查：
   - Birdeye `token_creation_info`
   - Birdeye `token_security`
   - Birdeye `token_overview`
   - Birdeye `v3 token meta-data`
-  - Helius / Rugcheck 作为兜底数据源
-- LP Burned 判断优先使用 Birdeye `token_security`，仅当关键字段缺失时才回退 Rugcheck（减少免费接口限频影响）。
-- 先从 markets 中选 liquidity 最大的主池，再做 LP 判定，避免误取小池/废弃池。
-- 页面增加 LP 判定调试字段：raw/normalized/source/reason/mainPair，并显示 security/rugcheck 是否成功。
-- 当接口缺少 burned/locked 字段时，默认给出 `LP_UNKNOWN_ALLOWED`（可用环境变量关闭）。
-- 四条规则用于分流白名单/黑名单：
-  - LP burned > 95%
-  - mintAuthority = null
-  - freezeAuthority = null
-  - updateAuthority = null
-- 白名单继续周期刷新市场指标；黑名单不做实时指标浪费 API。
+  - Helius（authority 兜底）
+- **前置白名单判定（同级条件）**：
+  - `LP/FDV > 10%`
+  - `mintAuthority = null`
+  - `freezeAuthority = null`
+  - `updateAuthority = null`
+- 进入白名单后，才调用 Rugcheck 获取并展示：
+  - `是否 burned`
+  - `burned 比例`
 - 退出机制：
   - 白名单：AGE > 24h 或 AGE > 2h 且 FDV/MCAP < 30000
   - 黑名单：仅保留最近 15 分钟
@@ -40,9 +38,8 @@ node src/server.js
 - `DISCOVERY_SECONDS`（可选，默认 60）
 - `REFRESH_SECONDS`（可选，默认 30）
 - `NEW_LISTING_PAGE_SIZE`（可选，默认 50）
-- `LP_BURNED_THRESHOLD`（可选，默认 99.5）
-- `LP_LOCKED_THRESHOLD`（可选，默认 95）
-- `ALLOW_UNKNOWN_LP`（可选，默认 true；当 burned/locked 字段缺失时先放行，避免误杀）
+- `LP_FDV_THRESHOLD_PERCENT`（可选，默认 10）
+- `RUGCHECK_REFRESH_MINUTES`（可选，默认 5，白名单 burned 刷新间隔）
 
 可选覆盖：
 - `BIRDEYE_API_URL`（默认 `https://public-api.birdeye.so`）
@@ -62,6 +59,8 @@ node src/server.js
 - TOP10占比
 - TX 交易笔数
 - 买卖比（buy/sell）
+- LP Burned?
+- Burned%
 
 ### 黑名单
 - Symbol
