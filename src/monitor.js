@@ -59,20 +59,6 @@ function normalizeEpochMaybe(v) {
 }
 
 
-function getListingTimestamp(item) {
-  const candidates = [
-    item?.liquidityAddedAt,
-    item?.listedAt,
-    item?.createdAt,
-    item?.created_at,
-    item?.timestamp,
-  ];
-  for (const v of candidates) {
-    const t = normalizeEpochMaybe(v);
-    if (t) return t;
-  }
-  return null;
-}
 
 export class TokenMonitor {
   constructor() {
@@ -145,11 +131,6 @@ export class TokenMonitor {
       for (const item of listed) {
         const address = item?.address;
         if (!address || this.seenAddresses.has(address)) continue;
-
-        const listingTs = getListingTimestamp(item);
-        if (!listingTs) continue;
-        const ageMs = now() - listingTs;
-        if (ageMs < config.minListingAgeMinutes * 60 * 1000) continue;
 
         this.seenAddresses.add(address);
         await this.onNewToken(item, { publish: false });
@@ -256,8 +237,36 @@ export class TokenMonitor {
     token.stats.fdvOrMcap = fdv;
     token.stats.liquidity = liquidity;
     token.stats.lpOverFdv = fdv && liquidity ? Number((liquidity / fdv).toFixed(4)) : null;
-    token.stats.top10Percent = parseNumber(data.security?.data?.top10HolderPercent);
+    token.stats.top10Percent =
+      parsePercent(data.security?.data?.top10HolderPercent) ??
+      parsePercent(data.security?.data?.top10HolderRatio) ??
+      parsePercent(data.overview?.data?.top10HolderPercent) ??
+      parsePercent(data.overview?.data?.top10HolderRatio);
+
     token.stats.holders = parseNumber(data.overview?.data?.holder) ?? parseNumber(data.security?.data?.holder);
+
+    token.stats.txCount =
+      parseNumber(data.overview?.data?.txCount24h) ??
+      parseNumber(data.overview?.data?.trade24h) ??
+      parseNumber(data.overview?.data?.trade24hCount) ??
+      parseNumber(data.overview?.data?.txns24h) ??
+      token.stats.txCount ??
+      0;
+
+    token.stats.buyCount =
+      parseNumber(data.overview?.data?.buy24h) ??
+      parseNumber(data.overview?.data?.buy24hCount) ??
+      parseNumber(data.overview?.data?.buyTx24h) ??
+      token.stats.buyCount ??
+      0;
+
+    token.stats.sellCount =
+      parseNumber(data.overview?.data?.sell24h) ??
+      parseNumber(data.overview?.data?.sell24hCount) ??
+      parseNumber(data.overview?.data?.sellTx24h) ??
+      token.stats.sellCount ??
+      0;
+
     token.lastUpdateAt = now();
   }
 
@@ -265,6 +274,7 @@ export class TokenMonitor {
     const failed = [];
     const lpRatio = token.stats.lpOverFdv;
     if (lpRatio === null || lpRatio <= config.lpOverFdvThreshold) failed.push(`LP/FDV <= ${(config.lpOverFdvThreshold * 100).toFixed(0)}%`);
+    if (lpRatio !== null && lpRatio >= config.lpOverFdvUpperThreshold) failed.push(`LP/FDV >= ${(config.lpOverFdvUpperThreshold * 100).toFixed(0)}%`);
     if (token.security.mintAuthority !== null) failed.push('Mint Authority not null');
     if (token.security.freezeAuthority !== null) failed.push('Freeze Authority not null');
     if (token.security.updateAuthority !== null) failed.push('Update Authority not null');
@@ -289,6 +299,9 @@ export class TokenMonitor {
       token.security.lpBurned = burnPct !== null ? burnPct >= 99.5 : null;
       token.security.lpBurnedSource = 'rugcheck/report';
       token.security.burnCheckedAt = now();
+
+      const top10FromRugcheck = parsePercent(rug?.token?.topHoldersPct);
+      if (top10FromRugcheck !== null) token.stats.top10Percent = top10FromRugcheck;
     } catch (error) {
       token.security.lpBurnedSource = 'rugcheck_failed';
       token.security.burnCheckedAt = now();

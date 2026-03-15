@@ -2,7 +2,7 @@
 
 基于你的最新要求实现（先 LP/FDV，再 authority，再白名单补查 burned），并增加防卡死机制：
 
-- 每 60 秒轮询 Birdeye `defi/v2/tokens/new_listing`，仅处理 AGE ≥ 30 分钟的新币（可配置）。
+- 每 60 秒轮询 Birdeye `defi/v2/tokens/new_listing`，发现 Solana 新上市代币。
 - 对新地址做去重（`seenAddresses`），避免重复处理。
 - 对每个新币补查：
   - Birdeye `token_creation_info`
@@ -11,7 +11,7 @@
   - Birdeye `v3 token meta-data`
   - Helius（authority 兜底）
 - **前置白名单判定（同级条件）**：
-  - `LP/FDV > 10%`
+  - `10% < LP/FDV < 50%`
   - `mintAuthority = null`
   - `freezeAuthority = null`
   - `updateAuthority = null`
@@ -48,8 +48,8 @@ node src/server.js
 - `DISCOVERY_SECONDS`（可选，默认 60）
 - `REFRESH_SECONDS`（可选，默认 30）
 - `NEW_LISTING_PAGE_SIZE`（可选，默认 50）
-- `MIN_LISTING_AGE_MINUTES`（可选，默认 30，仅处理不低于该 AGE 的新币）
 - `LP_FDV_THRESHOLD_PERCENT`（可选，默认 10）
+- `LP_FDV_MAX_THRESHOLD_PERCENT`（可选，默认 50）
 - `IMMEDIATE_MIN_FDV`（可选，默认 10000，白名单低于该 FDV 立即退出）
 - `RUGCHECK_REFRESH_MINUTES`（可选，默认 5，白名单 burned 刷新间隔）
 - `HTTP_TIMEOUT_MS`（可选，默认 8000）
