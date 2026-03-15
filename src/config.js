@@ -14,4 +14,8 @@ export const config = {
   blacklistTtlMinutes: 15,
   maxNewListingPageSize: Number(process.env.NEW_LISTING_PAGE_SIZE || 50),
   lpOverFdvThreshold: Number(process.env.LP_FDV_THRESHOLD_PERCENT || 10) / 100,
+  httpTimeoutMs: Number(process.env.HTTP_TIMEOUT_MS || 8000),
+  tickBatchSize: Number(process.env.TICK_BATCH_SIZE || 50),
+  maxTrackedTokens: Number(process.env.MAX_TRACKED_TOKENS || 3000),
+  maxStateRows: Number(process.env.MAX_STATE_ROWS || 300),
 };

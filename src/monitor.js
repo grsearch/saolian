@@ -2,10 +2,16 @@ import { config } from './config.js';
 
 const now = () => Date.now();
 
-async function requestJson(url, options = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  return res.json();
+async function requestJson(url, options = {}, timeoutMs = config.httpTimeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function toNullish(value) {
@@ -59,6 +65,8 @@ export class TokenMonitor {
     this.seenAddresses = new Set();
     this.startedAt = now();
     this.discoveryRunning = false;
+    this.tickRunning = false;
+    this.tickCursor = 0;
   }
 
   start() {
@@ -88,14 +96,29 @@ export class TokenMonitor {
 
   getState() {
     const list = [...this.tokens.values()];
+    const whitelist = list.filter((t) => t.status === 'whitelist').sort((a, b) => b.discoveredAt - a.discoveredAt);
+    const blacklist = list.filter((t) => t.status === 'blacklist').sort((a, b) => b.discoveredAt - a.discoveredAt);
+
     return {
       startedAt: this.startedAt,
-      whitelist: list.filter((t) => t.status === 'whitelist').sort((a, b) => b.discoveredAt - a.discoveredAt),
-      blacklist: list.filter((t) => t.status === 'blacklist').sort((a, b) => b.discoveredAt - a.discoveredAt),
+      whitelistTotal: whitelist.length,
+      blacklistTotal: blacklist.length,
+      whitelist: whitelist.slice(0, config.maxStateRows),
+      blacklist: blacklist.slice(0, config.maxStateRows),
       pool: list.filter((t) => t.status === 'watching').length,
       total: list.length,
       seenCount: this.seenAddresses.size,
+      maxStateRows: config.maxStateRows,
     };
+  }
+
+  pruneIfNeeded() {
+    if (this.tokens.size <= config.maxTrackedTokens) return;
+    const sorted = [...this.tokens.values()].sort((a, b) => a.discoveredAt - b.discoveredAt);
+    const removeCount = this.tokens.size - config.maxTrackedTokens;
+    for (let i = 0; i < removeCount; i += 1) {
+      this.tokens.delete(sorted[i].address);
+    }
   }
 
   async discoveryLoop() {
@@ -107,15 +130,16 @@ export class TokenMonitor {
         const address = item?.address;
         if (!address || this.seenAddresses.has(address)) continue;
         this.seenAddresses.add(address);
-        await this.onNewToken(item);
+        await this.onNewToken(item, { publish: false });
       }
+      this.pruneIfNeeded();
       this.publish('update', this.getState());
     } finally {
       this.discoveryRunning = false;
     }
   }
 
-  async onNewToken(event) {
+  async onNewToken(event, options = { publish: true }) {
     const address = event?.address;
     if (!address || this.tokens.has(address)) return;
 
@@ -149,10 +173,10 @@ export class TokenMonitor {
       },
     });
 
-    await this.enrichAndClassify(address);
+    await this.enrichAndClassify(address, options);
   }
 
-  async enrichAndClassify(address) {
+  async enrichAndClassify(address, options = { publish: true }) {
     const token = this.tokens.get(address);
     if (!token) return;
 
@@ -164,15 +188,13 @@ export class TokenMonitor {
       this.fetchHeliusAsset(address),
     ]);
 
-    const data = {
+    this.mergeData(token, {
       creationInfo: creationInfo.status === 'fulfilled' ? creationInfo.value : null,
       security: security.status === 'fulfilled' ? security.value : null,
       overview: overview.status === 'fulfilled' ? overview.value : null,
       metadata: metadata.status === 'fulfilled' ? metadata.value : null,
       helius: helius.status === 'fulfilled' ? helius.value : null,
-    };
-
-    this.mergeData(token, data);
+    });
 
     const rules = this.evaluateRules(token);
     token.reasons = rules.failed;
@@ -182,7 +204,7 @@ export class TokenMonitor {
       await this.refreshWhitelistBurned(token);
     }
 
-    this.publish('update', this.getState());
+    if (options.publish) this.publish('update', this.getState());
   }
 
   mergeData(token, data) {
@@ -220,9 +242,7 @@ export class TokenMonitor {
   evaluateRules(token) {
     const failed = [];
     const lpRatio = token.stats.lpOverFdv;
-    if (lpRatio === null || lpRatio <= config.lpOverFdvThreshold) {
-      failed.push(`LP/FDV <= ${(config.lpOverFdvThreshold * 100).toFixed(0)}%`);
-    }
+    if (lpRatio === null || lpRatio <= config.lpOverFdvThreshold) failed.push(`LP/FDV <= ${(config.lpOverFdvThreshold * 100).toFixed(0)}%`);
     if (token.security.mintAuthority !== null) failed.push('Mint Authority not null');
     if (token.security.freezeAuthority !== null) failed.push('Freeze Authority not null');
     if (token.security.updateAuthority !== null) failed.push('Update Authority not null');
@@ -242,7 +262,6 @@ export class TokenMonitor {
           bestLiq = liq;
         }
       }
-
       const burnPct = parsePercent(best?.lp?.burnPct ?? rug?.liquidityDetails?.lpBurnPct ?? rug?.liquidityDetails?.lpBurnedPct);
       token.security.lpBurnedPct = burnPct;
       token.security.lpBurned = burnPct !== null ? burnPct >= 99.5 : null;
@@ -256,21 +275,36 @@ export class TokenMonitor {
   }
 
   async tick() {
-    const stamp = now();
-    for (const token of this.tokens.values()) {
-      if (token.status === 'whitelist') {
-        await this.refreshMarketStats(token);
-        if (!token.security.burnCheckedAt || stamp - token.security.burnCheckedAt > config.rugcheckRefreshMinutes * 60 * 1000) {
-          await this.refreshWhitelistBurned(token);
+    if (this.tickRunning) return;
+    this.tickRunning = true;
+    try {
+      const stamp = now();
+      const all = [...this.tokens.values()];
+      const batchSize = Math.max(1, config.tickBatchSize);
+      if (this.tickCursor >= all.length) this.tickCursor = 0;
+      const batch = all.slice(this.tickCursor, this.tickCursor + batchSize);
+      this.tickCursor += batch.length;
+      if (this.tickCursor >= all.length) this.tickCursor = 0;
+
+      for (const token of batch) {
+        if (token.status === 'whitelist') {
+          await this.refreshMarketStats(token);
+          if (!token.security.burnCheckedAt || stamp - token.security.burnCheckedAt > config.rugcheckRefreshMinutes * 60 * 1000) {
+            await this.refreshWhitelistBurned(token);
+          }
+          this.applyWhitelistExit(token, stamp);
         }
-        this.applyWhitelistExit(token, stamp);
+        if (token.status === 'blacklist') {
+          const ageMs = stamp - token.discoveredAt;
+          if (ageMs > config.blacklistTtlMinutes * 60 * 1000) this.tokens.delete(token.address);
+        }
       }
-      if (token.status === 'blacklist') {
-        const ageMs = stamp - token.discoveredAt;
-        if (ageMs > config.blacklistTtlMinutes * 60 * 1000) this.tokens.delete(token.address);
-      }
+
+      this.pruneIfNeeded();
+      this.publish('update', this.getState());
+    } finally {
+      this.tickRunning = false;
     }
-    this.publish('update', this.getState());
   }
 
   applyWhitelistExit(token, stamp) {
@@ -280,17 +314,11 @@ export class TokenMonitor {
       this.tokens.delete(token.address);
       return;
     }
-    if (ageMs > config.staleLowCapHours * 3600 * 1000 && fdv < config.lowCapThreshold) {
-      this.tokens.delete(token.address);
-    }
+    if (ageMs > config.staleLowCapHours * 3600 * 1000 && fdv < config.lowCapThreshold) this.tokens.delete(token.address);
   }
 
   async refreshMarketStats(token) {
-    const [overview, security] = await Promise.allSettled([
-      this.fetchBirdeyeTokenOverview(token.address),
-      this.fetchBirdeyeSecurity(token.address),
-    ]);
-
+    const [overview, security] = await Promise.allSettled([this.fetchBirdeyeTokenOverview(token.address), this.fetchBirdeyeSecurity(token.address)]);
     this.mergeData(token, {
       overview: overview.status === 'fulfilled' ? overview.value : null,
       security: security.status === 'fulfilled' ? security.value : null,
@@ -298,7 +326,6 @@ export class TokenMonitor {
       metadata: null,
       helius: null,
     });
-
     token.stats.txCount = token.stats.txCount ?? 0;
     token.stats.buyCount = token.stats.buyCount ?? 0;
     token.stats.sellCount = token.stats.sellCount ?? 0;
@@ -313,34 +340,28 @@ export class TokenMonitor {
 
   async fetchBirdeyeNewListing() {
     const url = `${config.birdeyeApiUrl}/defi/v2/tokens/new_listing?limit=${config.maxNewListingPageSize}`;
-    const json = await requestJson(url, { headers: this.birdeyeHeaders() });
-    return normalizeArrayResponse(json);
+    return normalizeArrayResponse(await requestJson(url, { headers: this.birdeyeHeaders() }));
   }
 
   async fetchBirdeyeCreationInfo(address) {
-    const url = `${config.birdeyeApiUrl}/defi/token_creation_info?address=${address}`;
-    return requestJson(url, { headers: this.birdeyeHeaders() });
+    return requestJson(`${config.birdeyeApiUrl}/defi/token_creation_info?address=${address}`, { headers: this.birdeyeHeaders() });
   }
 
   async fetchBirdeyeSecurity(address) {
-    const url = `${config.birdeyeApiUrl}/defi/token_security?address=${address}`;
-    return requestJson(url, { headers: this.birdeyeHeaders() });
+    return requestJson(`${config.birdeyeApiUrl}/defi/token_security?address=${address}`, { headers: this.birdeyeHeaders() });
   }
 
   async fetchBirdeyeMetadata(address) {
-    const url = `${config.birdeyeApiUrl}/defi/v3/token/meta-data/single?address=${address}`;
-    return requestJson(url, { headers: this.birdeyeHeaders() });
+    return requestJson(`${config.birdeyeApiUrl}/defi/v3/token/meta-data/single?address=${address}`, { headers: this.birdeyeHeaders() });
   }
 
   async fetchBirdeyeTokenOverview(address) {
-    const url = `${config.birdeyeApiUrl}/defi/token_overview?address=${address}`;
-    return requestJson(url, { headers: this.birdeyeHeaders() });
+    return requestJson(`${config.birdeyeApiUrl}/defi/token_overview?address=${address}`, { headers: this.birdeyeHeaders() });
   }
 
   async fetchHeliusAsset(address) {
     if (!config.heliusApiKey) return null;
-    const url = `${config.heliusApiUrl}/?api-key=${config.heliusApiKey}`;
-    return requestJson(url, {
+    return requestJson(`${config.heliusApiUrl}/?api-key=${config.heliusApiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: '1', method: 'getAsset', params: { id: address } }),
@@ -348,7 +369,6 @@ export class TokenMonitor {
   }
 
   async fetchRugcheck(address) {
-    const url = `${config.rugcheckApiUrl}/v1/tokens/${address}/report`;
-    return requestJson(url, { headers: { Accept: 'application/json' } });
+    return requestJson(`${config.rugcheckApiUrl}/v1/tokens/${address}/report`, { headers: { Accept: 'application/json' } });
   }
 }

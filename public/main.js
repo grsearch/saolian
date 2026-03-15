@@ -28,7 +28,7 @@ function tokenLink(address) {
 
 function render(state) {
   const now = Date.now();
-  meta.textContent = `总收录: ${state.total} | 观察池: ${state.pool} | seen: ${state.seenCount} | 最近刷新: ${new Date().toLocaleTimeString()}`;
+  meta.textContent = `总收录: ${state.total} | 白名单: ${state.whitelistTotal} | 黑名单: ${state.blacklistTotal} | 观察池: ${state.pool} | seen: ${state.seenCount} | 最近刷新: ${new Date().toLocaleTimeString()}`;
 
   whitelistBody.innerHTML = state.whitelist
     .map((t) => {
