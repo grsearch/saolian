@@ -127,7 +127,7 @@ export class TokenMonitor {
     if (this.discoveryRunning) return;
     this.discoveryRunning = true;
     try {
-      const listed = await this.fetchGeckoTrendingTokens();
+      const listed = await this.fetchBirdeyeNewListing();
       for (const item of listed) {
         const address = item?.address;
         if (!address || this.seenAddresses.has(address)) continue;
@@ -408,80 +408,6 @@ export class TokenMonitor {
     };
   }
 
-
-  geckoHeaders() {
-    return {
-      Accept: 'application/json',
-      ...(config.geckoApiKey ? { 'x-cg-pro-api-key': config.geckoApiKey } : {}),
-    };
-  }
-
-  extractGeckoToken(item, includedMap) {
-    const relId = item?.relationships?.base_token?.data?.id;
-    const inc = relId ? includedMap.get(relId) : null;
-
-    const addressFromId = typeof relId === 'string' && relId.includes('/') ? relId.split('/').pop() : null;
-    const address =
-      inc?.attributes?.address ||
-      addressFromId ||
-      item?.attributes?.base_token_address ||
-      item?.attributes?.token_address ||
-      null;
-
-    if (!address) return null;
-
-    return {
-      address,
-      symbol: inc?.attributes?.symbol || item?.attributes?.base_token_symbol || 'UNKNOWN',
-      name: inc?.attributes?.name || item?.attributes?.name || '',
-      source: 'geckoterminal_trending_5m',
-      liquidity: parseNumber(item?.attributes?.reserve_in_usd),
-      liquidityAddedAt: item?.attributes?.pool_created_at || null,
-    };
-  }
-
-  async fetchGeckoTrendingTokens() {
-    const endpoints = [
-      `${config.geckoApiUrl}/networks/solana/trending_pools?include=base_token&page=1&duration=5m`,
-      `${config.geckoApiUrl}/networks/solana/pools?sort=-5m_trend_score&include=base_token&page=1`,
-    ];
-
-    let lastErr = null;
-    for (const url of endpoints) {
-      try {
-        const json = await requestJson(url, { headers: this.geckoHeaders() });
-        const pools = Array.isArray(json?.data) ? json.data : [];
-        const included = Array.isArray(json?.included) ? json.included : [];
-        const includedMap = new Map(included.map((x) => [x?.id, x]));
-
-        const tokens = [];
-        let rankCount = 0;
-        for (const pool of pools) {
-          if (rankCount >= config.geckoTopN) break;
-          rankCount += 1;
-
-          const token = this.extractGeckoToken(pool, includedMap);
-          if (!token) continue;
-
-          const ts = normalizeEpochMaybe(token.liquidityAddedAt);
-          if (!ts) continue;
-
-          const ageMs = now() - ts;
-          if (ageMs < 0) continue;
-          if (ageMs >= config.geckoMaxAgeHours * 3600 * 1000) continue;
-
-          tokens.push(token);
-        }
-
-        if (tokens.length > 0) return tokens;
-      } catch (error) {
-        lastErr = error;
-      }
-    }
-
-    if (lastErr) throw lastErr;
-    return [];
-  }
 
   async fetchBirdeyeNewListing() {
     const url = `${config.birdeyeApiUrl}/defi/v2/tokens/new_listing?limit=${config.maxNewListingPageSize}`;
