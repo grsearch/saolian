@@ -455,10 +455,22 @@ export class TokenMonitor {
         const includedMap = new Map(included.map((x) => [x?.id, x]));
 
         const tokens = [];
+        let rankCount = 0;
         for (const pool of pools) {
+          if (rankCount >= config.geckoTopN) break;
+          rankCount += 1;
+
           const token = this.extractGeckoToken(pool, includedMap);
-          if (token) tokens.push(token);
-          if (tokens.length >= config.geckoTopN) break;
+          if (!token) continue;
+
+          const ts = normalizeEpochMaybe(token.liquidityAddedAt);
+          if (!ts) continue;
+
+          const ageMs = now() - ts;
+          if (ageMs < 0) continue;
+          if (ageMs >= config.geckoMaxAgeHours * 3600 * 1000) continue;
+
+          tokens.push(token);
         }
 
         if (tokens.length > 0) return tokens;

@@ -17,6 +17,7 @@ export const config = {
   blacklistTtlMinutes: 15,
   maxNewListingPageSize: Number(process.env.NEW_LISTING_PAGE_SIZE || 50),
   geckoTopN: Number(process.env.GECKO_TOP_N || 20),
+  geckoMaxAgeHours: Number(process.env.GECKO_MAX_AGE_HOURS || 6),
   lpOverFdvThreshold: Number(process.env.LP_FDV_THRESHOLD_PERCENT || 10) / 100,
   lpOverFdvUpperThreshold: Number(process.env.LP_FDV_MAX_THRESHOLD_PERCENT || 50) / 100,
   httpTimeoutMs: Number(process.env.HTTP_TIMEOUT_MS || 8000),

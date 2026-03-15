@@ -2,7 +2,7 @@
 
 基于你的最新要求实现（先 LP/FDV，再 authority，再白名单补查 burned），并增加防卡死机制：
 
-- 每 10 分钟轮询 GeckoTerminal（SOL 链 5m trending 前20池），提取对应 token 作为扫描入口。
+- 每 10 分钟轮询 GeckoTerminal（SOL 链 5m trending 前20池），仅提取其中 AGE < 6 小时的 token 作为扫描入口。
 - 对新地址做去重（`seenAddresses`），避免重复处理。
 - 对每个新币补查：
   - Birdeye `token_creation_info`
@@ -50,6 +50,7 @@ node src/server.js
 - `REFRESH_SECONDS`（可选，默认 30）
 - `NEW_LISTING_PAGE_SIZE`（可选，默认 50，保留配置）
 - `GECKO_TOP_N`（可选，默认 20）
+- `GECKO_MAX_AGE_HOURS`（可选，默认 6，仅保留前20中 AGE 小于该值的 token）
 - `LP_FDV_THRESHOLD_PERCENT`（可选，默认 10）
 - `LP_FDV_MAX_THRESHOLD_PERCENT`（可选，默认 50）
 - `IMMEDIATE_MIN_FDV`（可选，默认 10000，白名单低于该 FDV 立即退出）
