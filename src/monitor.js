@@ -173,6 +173,7 @@ export class TokenMonitor {
         lpBurnedPct: null,
         lpBurnedSource: null,
         burnCheckedAt: null,
+        webhookSentAt: null,
       },
     });
 
@@ -199,15 +200,43 @@ export class TokenMonitor {
       helius: helius.status === 'fulfilled' ? helius.value : null,
     });
 
+    const previousStatus = token.status;
     const rules = this.evaluateRules(token);
     token.reasons = rules.failed;
     token.status = rules.ok ? 'whitelist' : 'blacklist';
 
     if (token.status === 'whitelist') {
       await this.refreshWhitelistBurned(token);
+      if (previousStatus !== 'whitelist') {
+        await this.sendWhitelistWebhook(token);
+      }
     }
 
     if (options.publish) this.publish('update', this.getState());
+  }
+
+  async sendWhitelistWebhook(token) {
+    if (!config.webhookUrl || token.security.webhookSentAt) return;
+    const payload = { mint: token.address, symbol: token.symbol || 'UNKNOWN' };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.webhookTimeoutMs);
+    try {
+      const res = await fetch(config.webhookUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      token.security.webhookSentAt = now();
+    } catch (error) {
+      console.warn(`Webhook send failed for ${token.address}:`, error.message);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   mergeData(token, data) {

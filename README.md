@@ -15,6 +15,7 @@
   - `mintAuthority = null`
   - `freezeAuthority = null`
   - `updateAuthority = null`
+- 进入白名单后，立即发送 webhook：`{"mint":"...","symbol":"..."}`。
 - 进入白名单后，才调用 Rugcheck 获取并展示：
   - `是否 burned`
   - `burned 比例`
@@ -56,6 +57,8 @@ node src/server.js
 - `TICK_BATCH_SIZE`（可选，默认 50）
 - `MAX_TRACKED_TOKENS`（可选，默认 3000）
 - `MAX_STATE_ROWS`（可选，默认 300）
+- `WEBHOOK_URL`（可选，默认 `https://43.165.171.121:8000/webhook/token`）
+- `WEBHOOK_TIMEOUT_MS`（可选，默认 5000）
 
 可选覆盖：
 - `BIRDEYE_API_URL`（默认 `https://public-api.birdeye.so`）

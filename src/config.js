@@ -20,4 +20,6 @@ export const config = {
   tickBatchSize: Number(process.env.TICK_BATCH_SIZE || 50),
   maxTrackedTokens: Number(process.env.MAX_TRACKED_TOKENS || 3000),
   maxStateRows: Number(process.env.MAX_STATE_ROWS || 300),
+  webhookUrl: process.env.WEBHOOK_URL || 'https://43.165.171.121:8000/webhook/token',
+  webhookTimeoutMs: Number(process.env.WEBHOOK_TIMEOUT_MS || 5000),
 };
