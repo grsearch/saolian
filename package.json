@@ -1,0 +1,12 @@
+{
+  "name": "saolian-dashboard",
+  "version": "1.0.0",
+  "description": "SOL new token monitor with Birdeye + Helius + Rugcheck",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js"
+  }
+}

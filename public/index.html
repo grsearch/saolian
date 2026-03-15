@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SOL 新币扫描 Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>SOL 新币扫描 Dashboard</h1>
+      <p id="meta"></p>
+    </header>
+
+    <main>
+      <section>
+        <h2>白名单（实时更新）</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>合约地址</th>
+                <th>AGE</th>
+                <th>Holders</th>
+                <th>Liquidity</th>
+                <th>FDV/MCAP</th>
+                <th>LP/FDV</th>
+                <th>TOP10占比</th>
+                <th>TX</th>
+                <th>买/卖</th>
+                <th>LP Burned?</th>
+                <th>Burned%</th>
+              </tr>
+            </thead>
+            <tbody id="whitelist"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>黑名单（只保留 15 分钟）</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>合约地址</th>
+                <th>收录时间</th>
+                <th>拉黑原因</th>
+              </tr>
+            </thead>
+            <tbody id="blacklist"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
