@@ -19,4 +19,5 @@ export const config = {
   tickBatchSize: Number(process.env.TICK_BATCH_SIZE || 50),
   maxTrackedTokens: Number(process.env.MAX_TRACKED_TOKENS || 3000),
   maxStateRows: Number(process.env.MAX_STATE_ROWS || 300),
+  minListingAgeMinutes: Number(process.env.MIN_LISTING_AGE_MINUTES || 30),
 };

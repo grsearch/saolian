@@ -58,6 +58,22 @@ function normalizeEpochMaybe(v) {
   return n < 10_000_000_000 ? n * 1000 : n;
 }
 
+
+function getListingTimestamp(item) {
+  const candidates = [
+    item?.liquidityAddedAt,
+    item?.listedAt,
+    item?.createdAt,
+    item?.created_at,
+    item?.timestamp,
+  ];
+  for (const v of candidates) {
+    const t = normalizeEpochMaybe(v);
+    if (t) return t;
+  }
+  return null;
+}
+
 export class TokenMonitor {
   constructor() {
     this.tokens = new Map();
@@ -129,6 +145,12 @@ export class TokenMonitor {
       for (const item of listed) {
         const address = item?.address;
         if (!address || this.seenAddresses.has(address)) continue;
+
+        const listingTs = getListingTimestamp(item);
+        if (!listingTs) continue;
+        const ageMs = now() - listingTs;
+        if (ageMs < config.minListingAgeMinutes * 60 * 1000) continue;
+
         this.seenAddresses.add(address);
         await this.onNewToken(item, { publish: false });
       }
