@@ -35,6 +35,8 @@ function lpDebug(t) {
     `norm:${s.lpBurnedPct ?? '-'}`,
     `locked:${s.lpLockedPct ?? '-'}`,
     `reason:${s.lpReason || '-'}`,
+    `sec:${s.securityFetchOk ? 'ok' : 'fail'}`,
+    `rug:${s.rugcheckTried ? (s.rugcheckUsed ? 'used' : 'failed') : 'skip'}`,
   ].join(' | ');
 }
 

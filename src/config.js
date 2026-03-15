@@ -14,4 +14,5 @@ export const config = {
   maxNewListingPageSize: Number(process.env.NEW_LISTING_PAGE_SIZE || 50),
   lpBurnedThreshold: Number(process.env.LP_BURNED_THRESHOLD || 99.5),
   lpLockedThreshold: Number(process.env.LP_LOCKED_THRESHOLD || 95),
+  allowUnknownLp: String(process.env.ALLOW_UNKNOWN_LP || 'true').toLowerCase() === 'true',
 };

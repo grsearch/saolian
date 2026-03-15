@@ -53,6 +53,23 @@ function getPath(obj, path) {
   return cur ?? null;
 }
 
+function hasPath(obj, path) {
+  if (!obj) return false;
+  const segs = path.split('.');
+  let cur = obj;
+  for (const seg of segs) {
+    if (cur === null || cur === undefined) return false;
+    if (/^\d+$/.test(seg)) {
+      if (!Array.isArray(cur) || Number(seg) >= cur.length) return false;
+      cur = cur[Number(seg)];
+      continue;
+    }
+    if (!(seg in cur)) return false;
+    cur = cur[seg];
+  }
+  return true;
+}
+
 function pickFirstPath(obj, paths) {
   for (const path of paths) {
     const value = getPath(obj, path);
@@ -168,6 +185,9 @@ export class TokenMonitor {
         mainPairAddress: null,
         mainPairLiquidityUsd: null,
         mainPairDex: null,
+        rugcheckTried: false,
+        rugcheckUsed: false,
+        securityFetchOk: false,
       },
     });
 
@@ -196,7 +216,9 @@ export class TokenMonitor {
       securityFetchOk: security.status === 'fulfilled',
     };
 
-    if (this.needsRugcheckFallback(data)) {
+    const needRugcheck = this.needsRugcheckFallback(data);
+    token.security.rugcheckTried = needRugcheck;
+    if (needRugcheck) {
       try {
         data.rugcheck = await this.fetchRugcheck(address);
       } catch (error) {
@@ -234,11 +256,11 @@ export class TokenMonitor {
       'data.markets.0.lpBurnedPercent',
     ]);
 
-    const mintAuthority = getPath(sec, 'data.mintAuthority');
-    const freezeAuthority = getPath(sec, 'data.freezeAuthority');
-    const updateAuthority = getPath(sec, 'data.updateAuthority');
+    const hasMintAuthorityField = hasPath(sec, 'data.mintAuthority');
+    const hasFreezeAuthorityField = hasPath(sec, 'data.freezeAuthority');
+    const hasUpdateAuthorityField = hasPath(sec, 'data.updateAuthority');
 
-    return lpBurned.value === null || mintAuthority === null || freezeAuthority === null || updateAuthority === null;
+    return lpBurned.path === null || !hasMintAuthorityField || !hasFreezeAuthorityField || !hasUpdateAuthorityField;
   }
 
   extractMainPair(data) {
@@ -361,6 +383,9 @@ export class TokenMonitor {
     }
 
     if (burned.percent === null && locked.percent === null) {
+      if (config.allowUnknownLp) {
+        return { passed: true, reason: 'LP_UNKNOWN_ALLOWED' };
+      }
       return { passed: false, reason: 'LP_BURNED_FIELD_MISSING' };
     }
 
@@ -394,6 +419,8 @@ export class TokenMonitor {
     token.security.mintAuthority = mintAuthority;
     token.security.freezeAuthority = freezeAuthority;
     token.security.updateAuthority = updateAuthority;
+    token.security.securityFetchOk = Boolean(data.securityFetchOk);
+    token.security.rugcheckUsed = Boolean(data.rugcheck);
 
     const lp = this.decideLpStatus(data, token);
     token.security.lpPassed = lp.passed;
