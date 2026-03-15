@@ -23,6 +23,29 @@ function normalizeArrayResponse(payload) {
   return [];
 }
 
+function parsePercent(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    const cleaned = value.replace('%', '').trim();
+    const num = Number(cleaned);
+    if (!Number.isFinite(num)) return null;
+    if (num >= 0 && num <= 1) return num * 100;
+    return num;
+  }
+
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  if (num >= 0 && num <= 1) return num * 100;
+  return num;
+}
+
+function firstNonNull(values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined) return value;
+  }
+  return null;
+}
+
 export class TokenMonitor {
   constructor() {
     this.tokens = new Map();
@@ -109,7 +132,10 @@ export class TokenMonitor {
         buyCount: 0,
         sellCount: 0,
       },
-      security: {},
+      security: {
+        lpBurnedPct: null,
+        lpBurnedSource: null,
+      },
     });
 
     await this.enrichAndClassify(address);
@@ -119,13 +145,12 @@ export class TokenMonitor {
     const token = this.tokens.get(address);
     if (!token) return;
 
-    const [creationInfo, security, overview, metadata, helius, rugcheck] = await Promise.allSettled([
+    const [creationInfo, security, overview, metadata, helius] = await Promise.allSettled([
       this.fetchBirdeyeCreationInfo(address),
       this.fetchBirdeyeSecurity(address),
       this.fetchBirdeyeTokenOverview(address),
       this.fetchBirdeyeMetadata(address),
       this.fetchHeliusAsset(address),
-      this.fetchRugcheck(address),
     ]);
 
     const data = {
@@ -134,8 +159,17 @@ export class TokenMonitor {
       overview: overview.status === 'fulfilled' ? overview.value : null,
       metadata: metadata.status === 'fulfilled' ? metadata.value : null,
       helius: helius.status === 'fulfilled' ? helius.value : null,
-      rugcheck: rugcheck.status === 'fulfilled' ? rugcheck.value : null,
+      rugcheck: null,
     };
+
+    // 仅当 Birdeye 关键字段缺失时才使用 Rugcheck 兜底，减少免费 API 限频影响。
+    if (this.needsRugcheckFallback(data)) {
+      try {
+        data.rugcheck = await this.fetchRugcheck(address);
+      } catch (error) {
+        console.warn(`Rugcheck fallback failed for ${address}:`, error.message);
+      }
+    }
 
     this.mergeData(token, data);
     const rules = this.evaluateRules(token);
@@ -147,6 +181,43 @@ export class TokenMonitor {
     }
 
     this.publish('update', this.getState());
+  }
+
+  needsRugcheckFallback(data) {
+    const sec = data.security?.data || {};
+    const lp = firstNonNull([sec.lpBurnedPercent, sec.lpBurnedPct]);
+    const missingAuthorities = sec.mintAuthority === undefined || sec.freezeAuthority === undefined || sec.updateAuthority === undefined;
+    return lp === null || lp === undefined || missingAuthorities;
+  }
+
+  resolveLpBurned(data) {
+    const birdeyeSec = data.security?.data || {};
+    const birdeyeCandidates = [
+      birdeyeSec.lpBurnedPercent,
+      birdeyeSec.lpBurnedPct,
+      birdeyeSec.lp_burned_percent,
+      birdeyeSec.lp_burned_pct,
+    ]
+      .map(parsePercent)
+      .filter((v) => v !== null);
+
+    if (birdeyeCandidates.length > 0) {
+      return { value: Math.max(...birdeyeCandidates), source: 'birdeye/token_security' };
+    }
+
+    const rugcheckCandidates = [
+      data.rugcheck?.markets?.[0]?.lp?.burnPct,
+      data.rugcheck?.liquidityDetails?.lpBurnPct,
+      data.rugcheck?.liquidityDetails?.lpBurnedPct,
+    ]
+      .map(parsePercent)
+      .filter((v) => v !== null);
+
+    if (rugcheckCandidates.length > 0) {
+      return { value: Math.max(...rugcheckCandidates), source: 'rugcheck/report' };
+    }
+
+    return { value: null, source: 'unknown' };
   }
 
   mergeData(token, data) {
@@ -173,15 +244,15 @@ export class TokenMonitor {
     const updateAuthority = toNullish(
       birdeyeSec.updateAuthority ?? data.helius?.result?.authorities?.[0]?.address ?? data.rugcheck?.token?.updateAuthority,
     );
-    const lpBurnedPct = Number(
-      birdeyeSec.lpBurnedPercent ??
-        birdeyeSec.lpBurnedPct ??
-        data.rugcheck?.markets?.[0]?.lp?.burnPct ??
-        data.rugcheck?.liquidityDetails?.lpBurnPct ??
-        0,
-    );
+    const lp = this.resolveLpBurned(data);
 
-    token.security = { mintAuthority, freezeAuthority, updateAuthority, lpBurnedPct };
+    token.security = {
+      mintAuthority,
+      freezeAuthority,
+      updateAuthority,
+      lpBurnedPct: lp.value,
+      lpBurnedSource: lp.source,
+    };
 
     const fdv = Number(
       data.overview?.data?.fdv ||
@@ -202,10 +273,13 @@ export class TokenMonitor {
 
   evaluateRules(token) {
     const failed = [];
-    if ((token.security.lpBurnedPct ?? 0) <= 95) failed.push('LP Burned <= 95%');
+    const lpBurnedPct = token.security.lpBurnedPct;
+
+    if (lpBurnedPct === null || lpBurnedPct <= 95) failed.push('LP Burned <= 95%');
     if (token.security.mintAuthority !== null) failed.push('Mint Authority not null');
     if (token.security.freezeAuthority !== null) failed.push('Freeze Authority not null');
     if (token.security.updateAuthority !== null) failed.push('Update Authority not null');
+
     return { ok: failed.length === 0, failed };
   }
 

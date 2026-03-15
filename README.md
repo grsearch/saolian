@@ -10,6 +10,7 @@
   - Birdeye `token_overview`
   - Birdeye `v3 token meta-data`
   - Helius / Rugcheck 作为兜底数据源
+- LP Burned 判断优先使用 Birdeye `token_security`，仅当关键字段缺失时才回退 Rugcheck（减少免费接口限频影响）。
 - 四条规则用于分流白名单/黑名单：
   - LP burned > 95%
   - mintAuthority = null
