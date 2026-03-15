@@ -11,6 +11,7 @@ export const config = {
   whitelistExitHours: 24,
   staleLowCapHours: 2,
   lowCapThreshold: 30000,
+  immediateMinFdv: Number(process.env.IMMEDIATE_MIN_FDV || 10000),
   blacklistTtlMinutes: 15,
   maxNewListingPageSize: Number(process.env.NEW_LISTING_PAGE_SIZE || 50),
   lpOverFdvThreshold: Number(process.env.LP_FDV_THRESHOLD_PERCENT || 10) / 100,

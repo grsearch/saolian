@@ -29,7 +29,7 @@
 
 ## 退出机制
 
-- 白名单：AGE > 24h 或 AGE > 2h 且 FDV/MCAP < 30000
+- 白名单：FDV/MCAP < 10000 立即退出；或 AGE > 24h；或 AGE > 2h 且 FDV/MCAP < 30000
 - 黑名单：仅保留最近 15 分钟
 
 ## 启动
@@ -49,6 +49,7 @@ node src/server.js
 - `REFRESH_SECONDS`（可选，默认 30）
 - `NEW_LISTING_PAGE_SIZE`（可选，默认 50）
 - `LP_FDV_THRESHOLD_PERCENT`（可选，默认 10）
+- `IMMEDIATE_MIN_FDV`（可选，默认 10000，白名单低于该 FDV 立即退出）
 - `RUGCHECK_REFRESH_MINUTES`（可选，默认 5，白名单 burned 刷新间隔）
 - `HTTP_TIMEOUT_MS`（可选，默认 8000）
 - `TICK_BATCH_SIZE`（可选，默认 50）

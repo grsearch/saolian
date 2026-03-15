@@ -310,6 +310,12 @@ export class TokenMonitor {
   applyWhitelistExit(token, stamp) {
     const ageMs = stamp - token.discoveredAt;
     const fdv = token.stats.fdvOrMcap || 0;
+
+    if (fdv < config.immediateMinFdv) {
+      this.tokens.delete(token.address);
+      return;
+    }
+
     if (ageMs > config.whitelistExitHours * 3600 * 1000) {
       this.tokens.delete(token.address);
       return;
